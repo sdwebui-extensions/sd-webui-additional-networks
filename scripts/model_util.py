@@ -5,11 +5,13 @@ import shutil
 import json
 import stat
 import tqdm
+import glob
 from collections import OrderedDict
 from multiprocessing.pool import ThreadPool as Pool
 
 from modules import shared, sd_models, hashes
 from scripts import safetensors_hack, model_util, util
+from modules.paths_internal import models_path
 import modules.scripts as scripts
 
 
@@ -20,7 +22,7 @@ re_legacy_hash = re.compile("\(([0-9a-f]{8})\)$")  # matches 8-character hashes,
 lora_models = {}  # "My_Lora(abcdef123456)" -> "C:/path/to/model.safetensors"
 lora_model_names = {}  # "my_lora" -> "My_Lora(My_Lora(abcdef123456)"
 legacy_model_names = {}
-lora_models_dir = os.path.join(scripts.basedir(), "models/lora")
+lora_models_dir = os.path.join(models_path, "Lora")
 os.makedirs(lora_models_dir, exist_ok=True)
 
 
@@ -313,15 +315,18 @@ def update_models():
     paths = [lora_models_dir]
     if os.path.exists(shared.cmd_opts.lora_dir):
         paths.append(shared.cmd_opts.lora_dir)
-    for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/models/Lora')):
-        paths.append(folder_path)
-    for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/*/models/Lora')):
-        paths.append(folder_path)
+    if not shared.cmd_opts.nowebui and shared.cmd_opts.uid is None:
+        for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/models/Lora')):
+            paths.append(folder_path)
+        for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/*/models/Lora')):
+            paths.append(folder_path)
     extra_lora_paths = util.split_path_list(shared.opts.data.get("additional_networks_extra_lora_path", ""))
     for path in extra_lora_paths:
         path = path.lstrip()
         if os.path.isdir(path):
             paths.append(path)
+    paths = list(set(paths))
+    print(paths)
 
     sort_by = shared.opts.data.get("additional_networks_sort_models_by", "name")
     filter_by = shared.opts.data.get("additional_networks_model_name_filter", "")
