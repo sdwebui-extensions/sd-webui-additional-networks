@@ -224,6 +224,9 @@ class Script(scripts.Script):
 
                 model_path = lora_models.get(model, None)
                 if model_path is None:
+                    model_util.update_models()
+                    model_path = lora_models.get(model, None)
+                if model_path is None:
                     raise RuntimeError(f"model not found: {model}")
 
                 if model_path.startswith('"') and model_path.endswith('"'):  # trim '"' at start/end
