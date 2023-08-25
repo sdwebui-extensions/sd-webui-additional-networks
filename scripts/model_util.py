@@ -315,11 +315,13 @@ def update_models():
     paths = [lora_models_dir]
     if os.path.exists(shared.cmd_opts.lora_dir):
         paths.append(shared.cmd_opts.lora_dir)
-    if not shared.cmd_opts.nowebui and shared.cmd_opts.uid is None:
-        for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/models/Lora')):
-            paths.append(folder_path)
-        for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/*/models/Lora')):
-            paths.append(folder_path)
+    if shared.cmd_opts.uid is None:
+        if os.environ.get('SERVICE_NAME', '') == '':
+            for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, 'users/*/models/Lora')):
+                paths.append(folder_path)
+        else:
+            for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, '*/models/Lora')):
+                paths.append(folder_path)
     extra_lora_paths = util.split_path_list(shared.opts.data.get("additional_networks_extra_lora_path", ""))
     for path in extra_lora_paths:
         path = path.lstrip()
