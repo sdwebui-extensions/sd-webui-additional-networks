@@ -4,13 +4,13 @@ import torch
 import numpy as np
 
 import modules.scripts as scripts
-from modules import shared, script_callbacks
+from modules import shared, script_callbacks, devices
 import gradio as gr
 
 import modules.ui
 from modules.ui_components import ToolButton, FormRow
 
-from scripts import addnet_xyz_grid_support, lora_compvis, model_util, metadata_editor
+from scripts import addnet_xyz_grid_support, lora_compvis, model_util, metadata_editor, cp_networks
 from scripts.model_util import lora_models, MAX_MODEL_COUNT
 
 
@@ -22,8 +22,11 @@ class Script(scripts.Script):
     def __init__(self) -> None:
         super().__init__()
         self.latest_params = [(None, None, None, None)] * MAX_MODEL_COUNT
+        self.latest_blade_params = []
         self.latest_networks = []
         self.latest_model_hash = ""
+        self.last_mask_image = None
+        self.blade_activate = shared.cmd_opts.blade
 
     def title(self):
         return "Additional networks for generating"
@@ -181,15 +184,88 @@ class Script(scripts.Script):
             print("restoring last networks")
             for network, _ in self.latest_networks[::-1]:
                 network.restore(text_encoder, unet)
+            # if clear:
             self.latest_networks.clear()
+    
+    def restore_networks_before_blade(self, sd_model):
+        redirect_foward_args = (
+                                    cp_networks.network_Linear_forward, 
+                                    cp_networks.network_Linear_load_state_dict,
+                                    cp_networks.network_Conv2d_forward, 
+                                    cp_networks.network_Conv2d_load_state_dict,
+                                    cp_networks.network_MultiheadAttention_forward,
+                                    cp_networks.network_MultiheadAttention_load_state_dict
+                                )
+        for i, lora_rep_type in enumerate([torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention]):
+            # breakpoint()
+            # lora_rep_type.orig_forward_bkp = lora_rep_type.forward
+            # lora_rep_type.orig_load_bkp = lora_rep_type._load_from_state_dict
+            lora_rep_type.forward = redirect_foward_args[i * 2]
+            lora_rep_type._load_from_state_dict = redirect_foward_args[i * 2 + 1]
+
+        unet = sd_model.model.diffusion_model
+        text_encoder = sd_model.cond_stage_model
+
+        if len(self.latest_networks) > 0:
+            print("restoring last networks before using blade")
+            for network, _ in self.latest_networks[::-1]:
+                network.restore_before_blade(text_encoder, unet, *redirect_foward_args)
+
+    def restore_networks_before_disable(self, sd_model=None):
+        # for i, lora_rep_type in enumerate([torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention]):
+            # lora_rep_type.forward = lora_rep_type.orig_forward_bkp
+            # lora_rep_type._load_from_state_dict = lora_rep_type.orig_load_bkp
+        import networks
+        torch.nn.Linear.forward = networks.network_Linear_forward
+        torch.nn.Linear._load_from_state_dict = networks.network_Linear_load_state_dict
+        torch.nn.Conv2d.forward = networks.network_Conv2d_forward
+        torch.nn.Conv2d._load_from_state_dict = networks.network_Conv2d_load_state_dict
+        torch.nn.MultiheadAttention.forward = networks.network_MultiheadAttention_forward
+        torch.nn.MultiheadAttention._load_from_state_dict = networks.network_MultiheadAttention_load_state_dict
+
+    def need_reblade_before_disable(self):
+        if len(self.latest_blade_params) == 0 or False not in [x[0] is None for x in self.latest_blade_params]:
+            return False
+        return True
+
+    def restore_main_branch(self):
+        # just restore the main branches
+        import sys
+        sys.path.append("extensions/blade-webui-extension")
+        import blade
+        blade.move_blade_to(shared.sd_model.model.diffusion_model, devices.cpu)
+        blade.move_main_to(shared.sd_model.model.diffusion_model, devices.device) # reload main to gpu
+        blade.restore_main_branch_before_forward(shared.sd_model.model.diffusion_model)
 
     def process_batch(self, p, *args, **kwargs):
         unet = p.sd_model.model.diffusion_model
         text_encoder = p.sd_model.cond_stage_model
-
         if not args[0]:
-            self.restore_networks(p.sd_model)
+            breakpoint()
+            self.restore_networks(p.sd_model) # redirect to original Lora functions
+            if self.need_reblade_before_disable():
+                import networks 
+                cp_networks.load_networks([], [], [], [], dummy_run=True) # minus current addnet weights
+                self.latest_blade_params = []
+                self.restore_networks_before_disable(p.sd_model) # hand over control to Lora extension
+                breakpoint()
+                # networks.lora_status = cp_networks.lora_status
+                # networks.last_req_params = cp_networks.last_req_params.copy()
+                # rerun this is because lora weights are eraised during cp_networks.load_netowrks
+                rerun_req_params = networks.last_req_params
+                networks.lora_status = 1 # hand over
+                if len(rerun_req_params[1]) > 0:
+                    networks.last_req_params = cp_networks.last_req_params.copy() # empty now
+                    networks.load_networks(*rerun_req_params[1:], dummy_run=True) # reload lora weights
+
+                # cp_networks.lora_status = 0
+                # cp_networks.last_req_params = [shared.opts.data["sd_model_checkpoint"], [], [], [], []]
+
             return
+        # cp_networks take over networks
+        # import networks
+        # cp_networks.lora_status = networks.lora_status
+        # cp_networks.last_req_params = networks.last_req_params
 
         params = []
         for i, ctrl in enumerate(args[2:]):
@@ -210,11 +286,59 @@ class Script(scripts.Script):
                     models_changed = True
                     break
 
-        if models_changed:
-            self.restore_networks(p.sd_model)
+        new_lora = shared.cmd_opts.blade and args[-2] is None
+        if not new_lora and self.blade_activate:
+            # restore main branch from blade branch
+            self.blade_activate = False
+            assert hasattr(shared.sd_model.model.diffusion_model, "main_input_blocks")
+            if cp_networks.lora_status != 0:
+                # dummy run only minus lora weights for unet, text model should also be processed
+                cp_networks.load_networks([], [], [], [], dummy_run=True) # a forward to minus lora weights from main blocks
+                if not models_changed:
+                    for net, _ in self.latest_networks:
+                        net.apply_lora_modules()
+                self.latest_blade_params = []
+            else:
+               self.restore_main_branch()
+        if new_lora:
+            import networks 
+            # if not hasattr(torch.nn.Linear, "orig_forward_bkp"):
+            self.restore_networks_before_blade(p.sd_model)
+            
+            self.blade_activate = True
+            names, umuls, tmuls, dyn_dims = [], [], [], []
+            for _, name, umul, tmul in params:
+                names.append(name)
+                umuls.append(umul)
+                tmuls.append(tmul)
+                dyn_dims.append(None)
+            # second part to handle orig lora
+            for name, umul, tmul, dyn_dim in zip(*networks.last_req_params[1:]):
+                names.append(name)
+                umuls.append(umul)
+                tmuls.append(tmul)
+                dyn_dims.append(dyn_dim)
+            cp_networks.load_networks(names, tmuls, umuls, dyn_dims)
+            # breakpoint()
+            self.latest_blade_params = params  
+
+        elif models_changed:
+            self.blade_activate = False
             self.latest_params = params
             self.latest_model_hash = p.sd_model.sd_model_hash
-
+            # restore_foward_args = (
+            #                             torch.nn.Linear_forward_before_network, 
+            #                             torch.nn.Linear_load_state_dict_before_network,
+            #                             torch.nn.Conv2d_forward_before_network, 
+            #                             torch.nn.Conv2d_load_state_dict_before_network,
+            #                             torch.nn.MultiheadAttention_forward_before_network,
+            #                             torch.nn.MultiheadAttention_load_state_dict_before_network
+            #                     )
+            # for i, lora_rep_type in enumerate([torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention]):
+            #     lora_rep_type.forward = restore_foward_args[i * 2]
+            #     lora_rep_type._load_from_state_dict = restore_foward_args[i * 2 + 1]
+            
+            self.restore_networks(p.sd_model)
             for module, model, weight_unet, weight_tenc in self.latest_params:
                 if model is None or model == "None" or len(model) == 0:
                     continue
@@ -261,16 +385,27 @@ class Script(scripts.Script):
             if mask_image is not None:
                 mask_image = mask_image.astype(np.float32) / 255.0
                 print(f"use mask image to control LoRA regions.")
-                for i, (network, model) in enumerate(self.latest_networks[:3]):
+                for i, net_t in enumerate(self.latest_networks[:3]):
+                    network = net_t[0] if isinstance(net_t, tuple) else net_t
                     if not hasattr(network, "set_mask"):
                         continue
                     mask = mask_image[:, :, i]  # R,G,B
                     if mask.max() <= 0:
                         continue
                     mask = torch.tensor(mask, dtype=p.sd_model.dtype, device=p.sd_model.device)
-
+                    # breakpoint()
                     network.set_mask(mask, height=p.height, width=p.width, hr_height=p.hr_upscale_to_y, hr_width=p.hr_upscale_to_x)
-                    print(f"apply mask. channel: {i}, model: {model}")
+                    if new_lora:
+                        for key, module in network.modules.items():
+                            assert hasattr(module, "set_mask_dic")
+                            if "text" in module.network_key:
+                                continue
+                            module.set_mask_dic(network.mask_dic) # ref for apply weights later
+                    
+                    if not new_lora:
+                        print(f"apply mask. channel: {i}, model: {model}")
+                    else:
+                        print(f"apply mask. channel: {i}, model: {network.name}")
             else:
                 for network, _ in self.latest_networks:
                     if hasattr(network, "set_mask"):
