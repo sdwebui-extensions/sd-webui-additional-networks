@@ -101,58 +101,6 @@ class Network:  # LoraModule
         self.mentioned_name = None
         """the text that was used to add the network to prompt - can be either name or an alias"""
         self.latest_mask_info = None
-        self.mask_dic = None
-        self.mask_hash = None
-
-    
-    def set_mask(self, mask, height=None, width=None, hr_height=None, hr_width=None):
-        if mask is None:
-            # clear latest mask
-            # print("clear mask")
-            self.latest_mask_info = None
-            self.mask_dic = None
-            self.mask_hash = None
-            return
-
-        # check mask image and h/w are same
-        if (
-            self.latest_mask_info is not None
-            and torch.equal(mask, self.latest_mask_info[0])
-            and (height, width, hr_height, hr_width) == self.latest_mask_info[1:]
-        ):
-            # print("mask not changed")
-            return
-
-        self.latest_mask_info = (mask, height, width, hr_height, hr_width)
-        breakpoint()
-        org_dtype = mask.dtype
-        if mask.dtype == torch.bfloat16:
-            mask = mask.to(torch.float)
-
-        mask_dic = {}
-        mask = mask.unsqueeze(0).unsqueeze(1)  # b(1),c(1),h,w
-
-        def resize_add(mh, mw):
-            # print(mh, mw, mh * mw)
-            m = torch.nn.functional.interpolate(mask, (mh, mw), mode="bilinear")  # doesn't work in bf16
-            m = m.to(org_dtype)
-            mask_dic[mh * mw] = m
-
-        for h, w in [(height, width), (hr_height, hr_width)]:
-            if not h or not w:
-                continue
-
-            h = h // 8
-            w = w // 8
-            for i in range(4):
-                resize_add(h, w)
-                if h % 2 == 1 or w % 2 == 1:  # add extra shape if h/w is not divisible by 2
-                    resize_add(h + h % 2, w + w % 2)
-                h = (h + 1) // 2
-                w = (w + 1) // 2
-        self.mask_dic = mask_dic
-        self.mask_hash = mask.__hash__()
-        return
 
 
 class ModuleType:

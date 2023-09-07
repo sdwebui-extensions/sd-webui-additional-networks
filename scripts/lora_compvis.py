@@ -68,7 +68,6 @@ class LoRAModule(torch.nn.Module):
         self.mask_area = -1
 
     def apply_to(self, orig=None):
-        # breakpoint()
         self.org_forward = (orig or self.org_module).forward
         (orig or self.org_module).forward = self.forward
         setattr((orig or self.org_module), "has_lora", True)
@@ -92,11 +91,8 @@ class LoRAModule(torch.nn.Module):
         """
         may be cascaded.
         """
-        # breakpoint()
-        # print("add net lora")
         if self.mask_dic is None:
             return self.org_forward(x) + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
-        # breakpoint()
         # regional LoRA
         # calculate lora and get size
         lx = self.lora_up(self.lora_down(x)) # B@A @ x * M + W @ x \=> (B@A * M + W) @ x
@@ -108,7 +104,6 @@ class LoRAModule(torch.nn.Module):
 
         if self.mask is None or self.mask_area != area:
             # get mask
-            # print(self.lora_name, x.size(), lx.size(), area)
             mask = self.mask_dic[area]
             if len(lx.size()) == 3:
                 mask = torch.reshape(mask, (1, -1, 1))
@@ -420,35 +415,6 @@ class LoRANetworkCompvis(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
             names.add(lora.lora_name)
-
-    def restore_before_blade(self, text_encoder, unet,  linear_forward=None, linear_load_sd=None, conv_forward=None, conv_load_sd=None, mha_forward=None, mha_load_sd=None):
-        modules = []
-        modules.extend(text_encoder.modules())
-        modules.extend(unet.modules())
-        from functools import partial
-        for module in modules:
-            if not hasattr(module, "has_lora"):
-                continue
-            if not isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention)):
-                breakpoint()
-            if isinstance(module, torch.nn.Linear):
-                # torch.nn.Linear.forward = linear_forward or module._lora_org_forward
-                # module.forward = (lambda *args: linear_forward(module, *args)) or module._lora_org_forward
-                module.forward = partial(linear_forward, module) or module._lora_org_forward
-                if linear_load_sd:
-                    module._load_from_state_dict = lambda *args: linear_load_sd(module, *args)
-            elif isinstance(module, torch.nn.Conv2d):
-                # torch.nn.Conv2d.forward = conv_forward or module._lora_org_forward
-                # module.forward = (lambda *args: conv_forward(module, *args)) or module._lora_org_forward
-                module.forward = partial(conv_forward, module) or module._lora_org_forward
-                if linear_load_sd:
-                    module._load_from_state_dict = lambda *args: conv_load_sd(module, *args)
-            else:
-                # torch.nn.MultiheadAttention.forward = mha_forward or module._lora_org_forward
-                # module.forward = (lambda *args: mha_forward(module, *args)) or module._lora_org_forward
-                module.forward = partial(mha_forward, module) or module._lora_org_forward
-                if linear_load_sd:
-                    module._load_from_state_dict = lambda *args: mha_load_sd(module, *args)
     
 
     def restore(self, text_encoder, unet):
@@ -460,12 +426,6 @@ class LoRANetworkCompvis(torch.nn.Module):
         for module in modules:
             if hasattr(module, "_lora_org_forward"):
                 assert isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention))
-                # if isinstance(module, torch.nn.Linear):
-                #     torch.nn.Linear.forward = module._lora_org_forward
-                # elif isinstance(module, torch.nn.Conv2d):
-                #     torch.nn.Conv2d.forward = module._lora_org_forward
-                # else:
-                #     torch.nn.MultiheadAttention.forward = module._lora_org_forward
                 module.forward = module._lora_org_forward
                 del module._lora_org_forward
                 restored = True
@@ -480,7 +440,6 @@ class LoRANetworkCompvis(torch.nn.Module):
             print("original forward/weights is restored.")
 
     def reapply_lora_modules(self):
-        breakpoint()
         # just redirect is fine
         for lora in self.text_encoder_loras + self.unet_loras:
             if type(lora) == LoRAModule:
@@ -526,7 +485,6 @@ class LoRANetworkCompvis(torch.nn.Module):
                 lora.apply_to()  # ensure remove reference to original Linear: reference makes key of state_dict
                 self.add_module(lora.lora_name, lora)
             else:
-                # breakpoint()
                 # SD2.x MultiheadAttention merge weights to MHA weights
                 lora_info: LoRAInfo = lora
                 if lora_info.module_name not in mha_loras:
@@ -659,7 +617,6 @@ class LoRANetworkCompvis(torch.nn.Module):
             return
 
         self.latest_mask_info = (mask, height, width, hr_height, hr_width)
-        # breakpoint()
         org_dtype = mask.dtype
         if mask.dtype == torch.bfloat16:
             mask = mask.to(torch.float)

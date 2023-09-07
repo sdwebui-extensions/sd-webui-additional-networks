@@ -10,7 +10,7 @@ from scripts import cp_network_lora
 import torch
 from typing import Union
 
-from modules import shared, devices, sd_models, errors, scripts, sd_hijack
+from modules import shared, devices, sd_models, errors, scripts, sd_hijack, script_callbacks
 
 from modules.common_paths import list_lora_models
 
@@ -127,8 +127,41 @@ def assign_network_names_to_compvis_modules(sd_model):
     sd_model.network_layer_mapping = network_layer_mapping
 
 
+def assign_non_model_names_to_compvis_modules(sd_model):
+    network_layer_mapping = {}
+    if shared.sd_model.is_sdxl:
+        for i, embedder in enumerate(shared.sd_model.conditioner.embedders):
+            if not hasattr(embedder, 'wrapped'):
+                continue
+
+            for name, module in embedder.wrapped.named_modules():
+                network_name = f'{i}_{name.replace(".", "_")}'
+                network_layer_mapping[network_name] = module
+                module.network_layer_name = network_name
+    else:
+        for name, module in shared.sd_model.cond_stage_model.wrapped.named_modules():
+            network_name = name.replace(".", "_")
+            network_layer_mapping[network_name] = module
+            module.network_layer_name = network_name
+    assert hasattr(sd_model, "network_layer_mapping")
+    sd_model.network_layer_mapping.update(network_layer_mapping)
+
+
+def assign_model_names_to_compvis_modules(sd_model):
+    network_layer_mapping = {}
+    for name, module in shared.sd_model.model.named_modules():
+        network_name = name.replace(".", "_")
+        network_layer_mapping[network_name] = module
+        module.network_layer_name = network_name
+
+    assert not hasattr(sd_model, "network_layer_mapping")
+    sd_model.network_layer_mapping = network_layer_mapping
+    # also record model names
+    assert not hasattr(sd_model, "network_model_name_mapping")
+    sd_model.network_model_name_mapping = network_layer_mapping.copy()
+
+
 def load_network(name, network_on_disk):
-    # breakpoint()
     net = cp_network.Network(name, network_on_disk)
     net.mtime = os.path.getmtime(network_on_disk.filename)
 
@@ -137,6 +170,9 @@ def load_network(name, network_on_disk):
     # this should not be needed but is here as an emergency fix for an unknown error people are experiencing in 1.2.0
     if not hasattr(shared.sd_model, 'network_layer_mapping'):
         assign_network_names_to_compvis_modules(shared.sd_model)
+    # if not hasattr(shared.sd_model, "network_layer_mapping"):
+    #     assign_model_names_to_compvis_modules(shared.sd_model)
+    # assign_non_model_names_to_compvis_modules(shared.sd_model)
 
     keys_failed_to_match = {}
     is_sd2 = 'model_transformer_resblocks' in shared.sd_model.network_layer_mapping
@@ -206,20 +242,20 @@ def need_reblade(names, te_multipliers=None, unet_multipliers=None, dyn_dims=Non
     return False
 
 
-def set_masks(masks):
-    assert len(masks) <= 3 and len(masks) <= len(loaded_networks)
-    for mask, net in zip(masks, loaded_networks):
-        net.set_mask(mask)
-
-
-def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, masks=None, dummy_run=False):
+def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, dummy_run=False):
     global lora_status
     if shared.cmd_opts.blade:
         import sys
         sys.path.append("extensions/blade-webui-extension")
         import blade
-    already_loaded = {}
     names = [name.split('(')[0] for name in names]
+    
+    reblade_run = shared.cmd_opts.blade and (need_reblade(names, te_multipliers, unet_multipliers, dyn_dims) or dummy_run)
+    if reblade_run and not shared.cmd_opts.blade_no_offload:
+        blade.move_blade_to(shared.sd_model.model.diffusion_model, devices.cpu)
+        blade.move_main_to(shared.sd_model.model.diffusion_model, devices.device) # reload main to gpu
+    
+    already_loaded = {}
 
     for net in loaded_networks:
         if net.name in names:
@@ -245,7 +281,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
                 try:
                     net = load_network(name, network_on_disk)
                 except Exception as e:
-                    errors.display(e, f"loading network {network_on_disk.filename}")
+                    errors.display(e, f"cp loading network {network_on_disk.filename}")
                     continue
 
             net.mentioned_name = name
@@ -254,7 +290,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
 
         if net is None:
             failed_to_load_networks.append(name)
-            print(f"Couldn't find network with name {name}")
+            print(f"cp Couldn't find network with name {name}")
             continue
 
         net.te_multiplier = te_multipliers[i] if te_multipliers else 1.0
@@ -262,20 +298,17 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         net.dyn_dim = dyn_dims[i] if dyn_dims else 1.0
         
         loaded_networks.append(net)
-        print(f'load network {name} from {network_on_disk.filename} with {net.te_multiplier} {net.unet_multiplier} {net.dyn_dim}')
+        print(f'cp load network {name} from {network_on_disk.filename} with {net.te_multiplier} {net.unet_multiplier} {net.dyn_dim}')
 
     if failed_to_load_networks:
         sd_hijack.model_hijack.comments.append("Failed to find networks: " + ", ".join(failed_to_load_networks))
 
-    # breakpoint()
-    if shared.cmd_opts.blade and need_reblade(names, te_multipliers, unet_multipliers, dyn_dims):
+    if reblade_run:
         lora_status = 1 # load lora or lora changed (deacitvate is also status=1)
-        # dummy_run = True
         blade.blade_optimize(shared.sd_model, lora_status, dummy_run)
     elif shared.cmd_opts.blade and lora_status == 1: # names can be empty
         lora_status = -1 # not need reblade but with lora
         blade.blade_optimize(shared.sd_model, lora_status, dummy_run)
-    return loaded_networks
 
 
 def network_restore_weights_from_backup(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.MultiheadAttention]):
@@ -290,50 +323,19 @@ def network_restore_weights_from_backup(self: Union[torch.nn.Conv2d, torch.nn.Li
     else:
         self.weight.copy_(weights_backup)
 
-'''
-    if self.mask_dic is None:
-        return self.org_forward(x) + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
 
-    # regional LoRA
-
-    # calculate lora and get size
-    lx = self.lora_up(self.lora_down(x))
-
-    if len(lx.size()) == 4:  # b,c,h,w
-        area = lx.size()[2] * lx.size()[3]
-    else:
-        area = lx.size()[1]  # b,seq,dim
-
-    if self.mask is None or self.mask_area != area:
-        # get mask
-        # print(self.lora_name, x.size(), lx.size(), area)
-        mask = self.mask_dic[area]
-        if len(lx.size()) == 3:
-            mask = torch.reshape(mask, (1, -1, 1))
-        self.mask = mask
-        self.mask_area = area
-
-    return self.org_forward(x) + lx * self.multiplier * self.scale * self.mask
-'''
-
-def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.MultiheadAttention], input=None):
+def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn.MultiheadAttention]):
     """
     Applies the currently selected set of networks to the weights of torch layer self.
     If weights already have this particular set of networks applied, does nothing.
     If not, restores orginal weights from backup and alters weights according to networks.
     """
-    # breakpoint()
-    # first right layer_name: transformer_text_model_encoder_layers_0_self_attn_q_proj
-    # wrong right layer_name: diffusion_model_time_embed_0 ?
     network_layer_name = getattr(self, 'network_layer_name', None)
     if network_layer_name is None:
         return
-    if network_layer_name == "transformer_text_model_encoder_layers_0_self_attn_q_proj":
-        breakpoint()
 
-    current_names = getattr(self, "cp_network_current_names", ())
-    # input.shape will affect how the mask_area will be calculated, we use it as a signature here
-    wanted_names = tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)
+    current_names = getattr(self, "cp_network_current_names", (shared.opts.data["sd_model_checkpoint"], ()))
+    wanted_names = tuple((shared.opts.data["sd_model_checkpoint"], tuple((x.name, x.te_multiplier, x.unet_multiplier, x.dyn_dim) for x in loaded_networks)))
 
     weights_backup = getattr(self, "network_weights_backup", None)
     if weights_backup is None:
@@ -349,8 +351,6 @@ def network_apply_weights(self: Union[torch.nn.Conv2d, torch.nn.Linear, torch.nn
 
         for net in loaded_networks:
             module = net.modules.get(network_layer_name, None)
-            # if module is not None:
-            #     breakpoint()
             if module is not None and hasattr(self, 'weight'):
                 with torch.no_grad():
                     updown = module.calc_updown(self.weight)
@@ -415,7 +415,7 @@ def network_forward(module, input, original_forward):
 
 
 def network_reset_cached_weight(self: Union[torch.nn.Conv2d, torch.nn.Linear]):
-    self.cp_network_current_names = ()
+    self.cp_network_current_names = (shared.opts.data["sd_model_checkpoint"], ())
     self.network_weights_backup = None
 
 
@@ -423,11 +423,7 @@ def network_Linear_forward(self, input):
     if shared.opts.lora_functional:
         return network_forward(self, input, torch.nn.Linear_forward_before_network)
 
-    network_apply_weights(self, input)
-    # from loguru import logger
-    # logger.debug(f"{self.weight.dtype} {self.bias.dtype if self.bias is not None else None} {input.dtype} {input.size()}")
-    # if self.weight.shape[-2:] == [320, 320] and input.shape[-2:] == [77, 768]:
-    #     breakpoint()
+    network_apply_weights(self)
     out = torch.nn.Linear_forward_before_network(self, input) # original forward
     return out
 
@@ -441,7 +437,7 @@ def network_Conv2d_forward(self, input):
     if shared.opts.lora_functional:
         return network_forward(self, input, torch.nn.Conv2d_forward_before_network)
 
-    network_apply_weights(self, input)
+    network_apply_weights(self)
 
     return torch.nn.Conv2d_forward_before_network(self, input)
 
@@ -453,7 +449,7 @@ def network_Conv2d_load_state_dict(self, *args, **kwargs):
 
 
 def network_MultiheadAttention_forward(self, *args, **kwargs):
-    network_apply_weights(self, input)
+    network_apply_weights(self)
 
     return torch.nn.MultiheadAttention_forward_before_network(self, *args, **kwargs)
 
@@ -539,11 +535,11 @@ def infotext_pasted(infotext, params):
     if added:
         params["Prompt"] += "\n" + "".join(added)
 
-
+# avoid redundant lora network loading
 available_networks = {}
 available_network_aliases = {}
 loaded_networks = []
 available_network_hash_lookup = {}
 forbidden_network_aliases = {}
-if not shared.cmd_opts.no_init_load_lora:
-    list_available_networks()
+# if not shared.cmd_opts.no_init_load_lora:
+#     list_available_networks()

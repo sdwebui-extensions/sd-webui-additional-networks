@@ -71,8 +71,6 @@ class NetworkModuleLora(cp_network.NetworkModule):
         down = self.down_model.weight.to(orig_weight.device, dtype=orig_weight.dtype)
 
         output_shape = [up.size(0), down.size(1)]
-        if self.mask_dic:
-            breakpoint()
         if self.mid_model is not None:
             # cp-decomposition
             mid = self.mid_model.weight.to(orig_weight.device, dtype=orig_weight.dtype)
@@ -83,28 +81,6 @@ class NetworkModuleLora(cp_network.NetworkModule):
                 output_shape += down.shape[2:]
             updown = cp_lyco_helpers.rebuild_conventional(up, down, output_shape, self.network.dyn_dim)
 
-        # # FIXME(zhiying.xzy): ref lora_compvis.py for mask, output_shape here is actually weight_shape
-        # if self.mask_dic:
-        #     self.up_model.to(up.device)
-        #     self.down_model.to(down.device)
-        #     lx = self.up_model(self.down_model(input)) # lora activations
-
-        #     if len(lx.size()) == 4:  # b,c,h,w
-        #         area = lx.size()[2] * lx.size()[3] # N C 64 64, 4096
-        #     else:
-        #         area = lx.size()[1]  # b,seq,dim
-
-        #     if self.mask is None or self.mask_area != area:
-        #         # get mask
-        #         # print(self.lora_name, x.size(), lx.size(), area)
-        #         mask = self.mask_dic[area] # 4096, 1024; mask: 64 * 64; lORA A @ LORA B, OIhw
-        #         if len(lx.size()) == 3:
-        #             mask = torch.reshape(mask, (1, -1, 1))
-        #         self.mask = mask
-        #         self.mask_area = area
-        # else:
-        #     self.mask = 1
-
         orig_updown = self.finalize_updown(updown, orig_weight, output_shape)
         # return orig_updown * self.mask # wrong
         return orig_updown
@@ -114,18 +90,3 @@ class NetworkModuleLora(cp_network.NetworkModule):
         self.down_model.to(device=devices.device)
 
         return y + self.up_model(self.down_model(x)) * self.multiplier() * self.calc_scale()
-
-    def set_mask_dic(self, mask_dic):
-        # called before every generation
-
-        # check this module is related to h,w (not context and time emb)
-        module_name = self.network_key # network_key is lora name, sd_key is the main branch module name
-        if "attn2_to_k" in module_name or "attn2_to_v" in module_name or "emb_layers" in module_name:
-            # print(f"LoRA for context or time emb: {self.lora_name}")
-            self.mask_dic = None
-        else:
-            self.mask_dic = mask_dic
-
-        self.mask = None
-
-
