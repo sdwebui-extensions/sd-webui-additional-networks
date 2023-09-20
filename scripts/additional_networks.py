@@ -281,6 +281,9 @@ class Script(scripts.Script):
                 cp_networks.load_networks(*networks.last_req_params[1:], dummy_run=True) # minus current addnet weights
                 self.latest_blade_params = copy.copy(networks.last_req_params[1:])
                 self.latest_addnet_params = []
+                # TODO(zhiying.xzy): find why we need to perform this? move blade to
+                import blade
+                blade.move_blade_to(shared.sd_model.model.diffusion_model, devices.cpu, force=True)
 
             if self.last_addnet_active:
                 # NOTE(zhiying.xzy): cp_networks will take over networks inherently, without explicitly specifying if enabling AddNet
