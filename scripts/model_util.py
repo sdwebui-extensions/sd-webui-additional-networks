@@ -13,6 +13,8 @@ from modules import shared, sd_models, hashes
 from scripts import safetensors_hack, model_util, util
 from modules.paths_internal import models_path
 import modules.scripts as scripts
+import glob
+from modules.timer import Timer
 
 
 # MAX_MODEL_COUNT = shared.cmd_opts.addnet_max_model_count or 5
@@ -98,25 +100,44 @@ def traverse_all_files(curr_path, model_list):
     return model_list
 
 
-def get_model_hash(metadata, filename):
+def get_model_hash(metadata, filename, timer):
     if metadata is None:
-        return hashes.calculate_sha256(filename)
+        if shared.cmd_opts.no_hashing:
+            model_hash = sd_models.model_hash_filename(filename.split('/')[-1])
+            timer.record('get_model_hash:model_hash_filename')
+        else:
+            model_hash = hashes.calculate_sha256(filename)
+            timer.record('get_model_hash:calculate_sha256')
+        return model_hash
 
     if "sshs_model_hash" in metadata:
         return metadata["sshs_model_hash"]
+    
+    if shared.cmd_opts.no_hashing:
+        model_hash = sd_models.model_hash_filename(filename.split('/')[-1])
+        timer.record('get_model_hash:model_hash_filename')
+        return model_hash
+    model_hash = safetensors_hack.hash_file(filename)
+    timer.record('get_model_hash:hash_file')
+    return model_hash
 
-    return safetensors_hack.hash_file(filename)
 
-
-def get_legacy_hash(metadata, filename):
+def get_legacy_hash(metadata, filename, timer):
     if metadata is None:
-        return sd_models.model_hash(filename)
+        if shared.cmd_opts.no_hashing:
+            model_hash = sd_models.model_hash_filename(filename.split('/')[-1])
+            timer.record('get_legacy_hash:model_hash_filename')
+        else:
+            model_hash = sd_models.model_hash(filename)
+            timer.record('get_legacy_hash:model_hash')
+        return model_hash
 
     if "sshs_legacy_hash" in metadata:
         return metadata["sshs_legacy_hash"]
-
-    return safetensors_hack.legacy_hash_file(filename)
-
+    
+    model_hash = safetensors_hack.legacy_hash_file(filename)
+    timer.record('get_legacy_hash:hash_file')
+    return model_hash
 
 import filelock
 
@@ -169,18 +190,23 @@ def hash_model_file(finfo):
     name = os.path.splitext(os.path.basename(filename))[0]
 
     # Prevent a hypothetical "None.pt" from being listed.
+    timer = Timer()
     if name != "None":
         metadata = None
 
         cached = cache("hashes").get(filename, None)
         if cached is None or stat.st_mtime != cached["mtime"]:
-            if metadata is None and model_util.is_safetensors(filename):
+            if metadata is None and model_util.is_safetensors(filename) and (not shared.cmd_opts.no_read_lora_meta):
                 try:
                     metadata = safetensors_hack.read_metadata(filename)
                 except Exception as ex:
                     return {"error": ex, "filename": filename}
-            model_hash = get_model_hash(metadata, filename)
-            legacy_hash = get_legacy_hash(metadata, filename)
+            timer.record('read metadata')
+            model_hash = get_model_hash(metadata, filename, timer)
+            timer.record('get_model_hash')
+            legacy_hash = get_legacy_hash(metadata, filename, timer)
+            timer.record('get_legacy_hash')
+            print(f'[AddNet] {timer.summary()} with {filename} {metadata}')
         else:
             model_hash = cached["model"]
             legacy_hash = cached["legacy"]
@@ -315,6 +341,8 @@ def update_models():
     paths = [lora_models_dir]
     if os.path.exists(shared.cmd_opts.lora_dir):
         paths.append(shared.cmd_opts.lora_dir)
+    if os.path.exists(os.path.join(shared.cmd_opts.data_dir, 'models/Lora')) and os.path.isdir(os.path.join(shared.cmd_opts.data_dir, 'models/Lora')):
+        paths.append(os.path.join(shared.cmd_opts.data_dir, 'models/Lora'))
     if shared.cmd_opts.uid is None:
         if os.environ.get('SERVICE_NAME', '') == '':
             for folder_path in glob.iglob(os.path.join(shared.cmd_opts.data_dir, 'users/*/models/Lora')):
