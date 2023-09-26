@@ -8,6 +8,7 @@ import math
 import re
 from typing import NamedTuple
 import torch
+from scripts import cp_networks
 
 
 class LoRAInfo(NamedTuple):
@@ -66,10 +67,13 @@ class LoRAModule(torch.nn.Module):
         self.mask = None
         self.mask_area = -1
 
-    def apply_to(self):
-        self.org_forward = self.org_module.forward
-        self.org_module.forward = self.forward
-        del self.org_module
+    def apply_to(self, orig=None):
+        self.org_forward = (orig or self.org_module).forward
+        (orig or self.org_module).forward = self.forward
+        setattr((orig or self.org_module), "has_lora", True)
+        if hasattr(self, "org_module"):
+            del self.org_module
+
 
     def set_mask_dic(self, mask_dic):
         # called before every generation
@@ -89,11 +93,9 @@ class LoRAModule(torch.nn.Module):
         """
         if self.mask_dic is None:
             return self.org_forward(x) + self.lora_up(self.lora_down(x)) * self.multiplier * self.scale
-
         # regional LoRA
-
         # calculate lora and get size
-        lx = self.lora_up(self.lora_down(x))
+        lx = self.lora_up(self.lora_down(x)) # B@A @ x * M + W @ x \=> (B@A * M + W) @ x
 
         if len(lx.size()) == 4:  # b,c,h,w
             area = lx.size()[2] * lx.size()[3]
@@ -102,14 +104,13 @@ class LoRAModule(torch.nn.Module):
 
         if self.mask is None or self.mask_area != area:
             # get mask
-            # print(self.lora_name, x.size(), lx.size(), area)
             mask = self.mask_dic[area]
             if len(lx.size()) == 3:
                 mask = torch.reshape(mask, (1, -1, 1))
             self.mask = mask
             self.mask_area = area
 
-        return self.org_forward(x) + lx * self.multiplier * self.scale * self.mask
+        return self.org_forward(x) + lx * (self.multiplier * self.mask) * self.scale
 
 
 def create_network_and_apply_compvis(du_state_dict, multiplier_tenc, multiplier_unet, text_encoder, unet, **kwargs):
@@ -322,7 +323,7 @@ class LoRANetworkCompvis(torch.nn.Module):
         self.multiplier_unet = multiplier_unet
         self.multiplier_tenc = multiplier_tenc
         self.latest_mask_info = None
-
+        self.main_lora_mapping = {}
         # check v1 or v2
         self.v2 = False
         for _, module in text_encoder.named_modules():
@@ -414,6 +415,7 @@ class LoRANetworkCompvis(torch.nn.Module):
         for lora in self.text_encoder_loras + self.unet_loras:
             assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
             names.add(lora.lora_name)
+    
 
     def restore(self, text_encoder, unet):
         # restore forward/weights from property for all modules
@@ -423,6 +425,7 @@ class LoRANetworkCompvis(torch.nn.Module):
         modules.extend(unet.modules())
         for module in modules:
             if hasattr(module, "_lora_org_forward"):
+                assert isinstance(module, (torch.nn.Linear, torch.nn.Conv2d, torch.nn.MultiheadAttention))
                 module.forward = module._lora_org_forward
                 del module._lora_org_forward
                 restored = True
@@ -436,7 +439,18 @@ class LoRANetworkCompvis(torch.nn.Module):
         if restored:
             print("original forward/weights is restored.")
 
-    def apply_lora_modules(self, du_state_dict):
+    def reapply_lora_modules(self):
+        # just redirect is fine
+        for lora in self.text_encoder_loras + self.unet_loras:
+            if type(lora) == LoRAModule:
+                lora.apply_to(self.main_lora_mapping[lora.lora_name])  # ensure remove reference to original Linear: reference makes key of state_dict
+                # self.add_module(lora.lora_name, lora)
+
+    def apply_lora_modules(self, du_state_dict=None):
+        if hasattr(self, "_applied") and getattr(self, "_applied"):
+            return self.reapply_lora_modules()
+    
+        setattr(self, "_applied", True)
         # conversion 1st step: convert names in state_dict
         state_dict = LoRANetworkCompvis.convert_state_dict_name_to_compvis(self.v2, du_state_dict)
 
@@ -467,6 +481,7 @@ class LoRANetworkCompvis(torch.nn.Module):
         mha_loras = {}
         for lora in self.text_encoder_loras + self.unet_loras:
             if type(lora) == LoRAModule:
+                self.main_lora_mapping[lora.lora_name] = lora.org_module
                 lora.apply_to()  # ensure remove reference to original Linear: reference makes key of state_dict
                 self.add_module(lora.lora_name, lora)
             else:
@@ -602,7 +617,6 @@ class LoRANetworkCompvis(torch.nn.Module):
             return
 
         self.latest_mask_info = (mask, height, width, hr_height, hr_width)
-
         org_dtype = mask.dtype
         if mask.dtype == torch.bfloat16:
             mask = mask.to(torch.float)
@@ -629,6 +643,8 @@ class LoRANetworkCompvis(torch.nn.Module):
                 h = (h + 1) // 2
                 w = (w + 1) // 2
 
+        assert False not in ["text" not in lora.lora_name for lora in self.unet_loras]
+        assert False not in ["text" in lora.lora_name for lora in self.text_encoder_loras]
         for lora in self.unet_loras:
             lora.set_mask_dic(mask_dic)
         return

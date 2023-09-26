@@ -8,6 +8,8 @@ import tqdm
 import glob
 from collections import OrderedDict
 from multiprocessing.pool import ThreadPool as Pool
+import torch
+from loguru import logger
 
 from modules import shared, sd_models, hashes
 from scripts import safetensors_hack, model_util, util
@@ -26,6 +28,46 @@ lora_model_names = {}  # "my_lora" -> "My_Lora(My_Lora(abcdef123456)"
 legacy_model_names = {}
 lora_models_dir = os.path.join(models_path, "Lora")
 os.makedirs(lora_models_dir, exist_ok=True)
+
+def move_blade_to(self, dev):
+    # import gc
+    used, reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    logger.debug(f"[AddNet] before moving blade, cuda mem consumed: {used / 1024 ** 3 :.2f} GB, reserved mem: {reserved / 1024 ** 3 :.2f} GB")
+
+    self.blade_input_blocks = self.blade_input_blocks.to(dev)
+    self.blade_middle_block = self.blade_middle_block.to(dev)
+    self.blade_output_blocks = self.blade_output_blocks.to(dev)
+
+    # gc.collect()
+    # if dev == devices.cpu:
+    #     devices.torch_gc()
+    used, reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    logger.debug(f"[AddNet] after moving blade, cuda mem consumed: {used / 1024 ** 3 :.2f} GB, reserved mem: {reserved / 1024 ** 3 :.2f} GB")
+
+
+def move_main_to(self, dev):
+    # import gc
+    used, reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    logger.debug(f"[AddNet] before moving main, cuda mem consumed: {used / 1024 ** 3 :.2f} GB, reserved mem: {reserved / 1024 ** 3 :.2f} GB")
+    self.main_input_blocks = self.main_input_blocks.to(dev)
+    self.main_middle_block = self.main_middle_block.to(dev)
+    self.main_output_blocks = self.main_output_blocks.to(dev)
+    # gc.collect()
+    # if dev == devices.cpu:
+    #     devices.torch_gc()
+    used, reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
+    logger.debug(f"[AddNet] after moving main, cuda mem consumed: {used / 1024 ** 3 :.2f} GB, reserved mem: {reserved / 1024 ** 3 :.2f} GB")
+
+
+def restore_main_branch_before_forward(self):
+    # self.blade_input_blocks = self.input_blocks
+    self.input_blocks = self.main_input_blocks
+
+    # self.blade_middle_block = self.middle_block
+    self.middle_block = self.main_middle_block
+
+    # self.blade_output_blocks = self.output_blocks
+    self.output_blocks = self.main_output_blocks
 
 
 def is_safetensors(filename):
