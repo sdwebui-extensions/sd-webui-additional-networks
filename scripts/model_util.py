@@ -248,7 +248,7 @@ def hash_model_file(finfo):
             timer.record('get_model_hash')
             legacy_hash = get_legacy_hash(metadata, filename, timer)
             timer.record('get_legacy_hash')
-            print(f'[AddNet] {timer.summary()} with {filename} {metadata}')
+            print(f'[AddNet] {timer.summary()} with {filename}')
         else:
             model_hash = cached["model"]
             legacy_hash = cached["legacy"]
