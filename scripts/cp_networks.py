@@ -242,7 +242,7 @@ def need_reblade(names, te_multipliers=None, unet_multipliers=None, dyn_dims=Non
     return False
 
 
-def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, dummy_run=False):
+def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=None, dummy_run=True, force_reblade=False):
     global lora_status
     if shared.cmd_opts.blade:
         import sys
@@ -250,7 +250,7 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
         import blade
     names = [name.split('(')[0] for name in names]
     
-    reblade_run = shared.cmd_opts.blade and (need_reblade(names, te_multipliers, unet_multipliers, dyn_dims) or dummy_run)
+    reblade_run = shared.cmd_opts.blade and (force_reblade or need_reblade(names, te_multipliers, unet_multipliers, dyn_dims))
     if reblade_run and not shared.cmd_opts.blade_no_offload:
         blade.move_blade_to(shared.sd_model.model.diffusion_model, devices.cpu)
         blade.move_main_to(shared.sd_model.model.diffusion_model, devices.device) # reload main to gpu
@@ -306,6 +306,8 @@ def load_networks(names, te_multipliers=None, unet_multipliers=None, dyn_dims=No
     if reblade_run:
         lora_status = 1 # load lora or lora changed (deacitvate is also status=1)
         blade.blade_optimize(shared.sd_model, lora_status, dummy_run)
+        if dummy_run:
+            lora_status = -1
     elif shared.cmd_opts.blade and lora_status == 1: # names can be empty
         lora_status = -1 # not need reblade but with lora
         blade.blade_optimize(shared.sd_model, lora_status, dummy_run)

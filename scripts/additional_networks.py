@@ -281,9 +281,9 @@ class Script(scripts.Script):
                 cp_networks.load_networks(*networks.last_req_params[1:], dummy_run=True) # minus current addnet weights
                 self.latest_blade_params = copy.copy(networks.last_req_params[1:])
                 self.latest_addnet_params = []
-                # TODO(zhiying.xzy): find why we need to perform this? move blade to
-                import blade
-                blade.move_blade_to(shared.sd_model.model.diffusion_model, devices.cpu, force=True)
+                # # TODO(zhiying.xzy): find why we need to perform this? move blade to
+                # import blade
+                # blade.move_blade_to(shared.sd_model.model.diffusion_model, devices.cpu, force=True)
 
             if self.last_addnet_active:
                 # NOTE(zhiying.xzy): cp_networks will take over networks inherently, without explicitly specifying if enabling AddNet
@@ -326,8 +326,9 @@ class Script(scripts.Script):
                 cp_networks.load_networks(*networks.last_req_params[1:], dummy_run=True)
             if networks.lora_status == -2:
                 self.restore_networks_before_bultin_lora(p.sd_model) # hand over the control to Lora extension
-                networks.load_networks(*networks.last_req_params[1:])
-                networks.lora_status = 1          
+                # This is used to restore main branch as blade cannot support masked lora
+                networks.load_networks(*networks.last_req_params[1:], dummy_run=False, force_reblade=True) 
+                networks.lora_status = 1
             # reset addnet lora setttings
             self.latest_blade_params = copy.copy(networks.last_req_params[1:])
             self.latest_addnet_params = []
@@ -350,7 +351,7 @@ class Script(scripts.Script):
             merged_params = [names + bl_names, tmuls + bl_tmuls, umuls + bl_umuls, dyn_dims + bl_dyn_dims]
 
             if cp_networks.lora_status != -1 or self.latest_blade_params != merged_params:
-                cp_networks.load_networks(*merged_params)
+                cp_networks.load_networks(*merged_params, dummy_run=True)
             self.latest_addnet_params = [names, tmuls, umuls, dyn_dims]
             self.latest_blade_params = merged_params
 
